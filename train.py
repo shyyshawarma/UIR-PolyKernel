@@ -97,7 +97,7 @@ def train():
 
             loss_psnr = criterion_psnr(res, tar)
             loss_ssim = 1 - structural_similarity_index_measure(res, tar, data_range=1)
-            # loss_uciqe = 1 - batch_uciqe(res)
+            loss_uciqe = 1 - batch_uciqe(res)
 
             train_loss = loss_psnr + 0.2 * loss_ssim 
 
