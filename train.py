@@ -14,7 +14,7 @@ from data import get_data
 
 from torchsampler import ImbalancedDatasetSampler
 
-# from metrics.uciqe import batch_uciqe
+from metrics.uciqe import batch_uciqe
 
 from models import *
 from utils import *
@@ -127,11 +127,11 @@ def train():
 
                 psnr += peak_signal_noise_ratio(res, tar, data_range=1).item()
                 ssim += structural_similarity_index_measure(res, tar, data_range=1).item()
-                # uciqe += batch_uciqe(res)
+                uciqe += batch_uciqe(res)
 
             psnr /= size
             ssim /= size
-            # uciqe /= size
+            uciqe /= size
             val_loss /= size
 
             if psnr > best_psnr:
