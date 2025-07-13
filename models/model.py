@@ -17,6 +17,75 @@ def cat(x1, x2):
     x = torch.cat([x2, x1], dim=1)
 
     return x
+class BasicConv(nn.Module):
+    def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1, relu=True, bn=False, bias=False):
+        super(BasicConv, self).__init__()
+        self.out_channels = out_planes
+        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias)
+        self.bn = nn.BatchNorm2d(out_planes,eps=1e-5, momentum=0.01, affine=True) if bn else None
+        self.relu = nn.ReLU() if relu else None
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.bn is not None:
+            x = self.bn(x)
+        if self.relu is not None:
+            x = self.relu(x)
+        return x
+
+class ChannelPool(nn.Module):
+    def forward(self, x):
+        return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1 )
+
+class spatial_attn_layer(nn.Module):
+    def __init__(self, kernel_size=5):
+        super(spatial_attn_layer, self).__init__()
+        self.compress = ChannelPool()
+        self.spatial = BasicConv(2, 1, kernel_size, stride=1, padding=(kernel_size-1) // 2, relu=False)
+    def forward(self, x):
+
+        x_compress = self.compress(x)
+        x_out = self.spatial(x_compress)
+        scale = torch.sigmoid(x_out)
+        return x * scale
+
+class CALayer(nn.Module):
+    def __init__(self, channel):
+        super(CALayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.ca = nn.Sequential(
+            nn.Conv2d(channel, channel // 8, 1, padding=0, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channel // 8, channel, 1, padding=0, bias=True),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = self.ca(y)
+        return x * y
+
+class CFA(nn.Module):
+    def __init__(
+            self, n_feat, kernel_size=3, reduction=8,
+            bias=False, bn=False, act=nn.PReLU(), res_scale=1):
+        super(CFA, self).__init__()
+        modules_body = [nn.Conv2d(n_feat, n_feat, kernel_size, padding=1), act, nn.Conv2d(n_feat, n_feat, kernel_size, padding=1)]
+        self.body = nn.Sequential(*modules_body)
+        ## Pixel Attention
+        self.SA = spatial_attn_layer()
+        ## Channel Attention
+        self.CA = CALayer(n_feat)
+        self.conv1x1 = nn.Conv2d(n_feat * 2, n_feat, kernel_size=1)
+
+    def forward(self, x):
+        res = self.body(x)
+        sa_branch = self.SA(res)
+        ca_branch = self.CA(res)
+        res = torch.cat([sa_branch, ca_branch], dim=1)
+        res = self.conv1x1(res)
+        res += x
+        return res
 
 
 class DWConv(nn.Module):
@@ -242,33 +311,115 @@ class FDPA(nn.Module):
         out = torch.real(out)  # Discard imaginary part (can also use torch.abs)
 
         return out * self.alpha + x * self.beta
-
-class HybridDomainAttention(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.norm1 = LayerNorm(dim)
-        self.norm2 = LayerNorm(dim)
-        self.ffn = FeedForward(dim, bias=False)
-
-        # Frequency-Domain Pixel Attention
-        self.fpa = FDPA(dim)
-
-        # Spatial-Domain Channel Attention
-        self.conv = nn.Conv2d(dim, dim, kernel_size=1, padding=0, stride=1, groups=1, bias=True)
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+    
+class DownSample(nn.Module):
+    def __init__(self, in_channels):
+        super(DownSample, self).__init__()
+        self.down = nn.Sequential(nn.Upsample(scale_factor=0.5, mode='bilinear', align_corners=False),
+                                  nn.Conv2d(in_channels, in_channels*2, 1, stride=1, padding=0, bias=False))
 
     def forward(self, x):
-        # frequency pixel attention
-        out = self.fpa(x)
+        x = self.down(x)
+        return x
 
-        # spatial channel attention
-        s_attn = self.conv(self.pool(self.norm1(out)))
-        out = s_attn * out
+class UpSample(nn.Module):
+    def __init__(self, in_channels):
+        super(UpSample, self).__init__()
+        self.up = nn.Sequential(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+                                nn.Conv2d(in_channels, int(in_channels/2), 1, stride=1, padding=0, bias=False))
 
-        out = x + out
-        out = out + self.ffn(self.norm2(out))
+    def forward(self, x):
+        x = self.up(x)
+        return x
+
+class UpSample_same(nn.Module):
+    def __init__(self, in_channels):
+        super(UpSample_same, self).__init__()
+        self.up = nn.Sequential(nn.Conv2d(in_channels, int(in_channels/2), 1, stride=1, padding=0, bias=False))
+
+    def forward(self, x):
+        x = self.up(x)
+        return x
+
+
+class HybridDomainAttention(nn.Module):
+    # def __init__(self, dim):
+    #     super().__init__()
+    #     self.norm1 = LayerNorm(dim)
+    #     self.norm2 = LayerNorm(dim)
+    #     self.ffn = FeedForward(dim, bias=False)
+
+    #     # Frequency-Domain Pixel Attention
+    #     self.fpa = FDPA(dim)
+
+    #     # Spatial-Domain Channel Attention
+    #     self.conv = nn.Conv2d(dim, dim, kernel_size=1, padding=0, stride=1, groups=1, bias=True)
+    #     self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
+    # def forward(self, x):
+    #     # frequency pixel attention
+    #     out = self.fpa(x)
+
+    #     # spatial channel attention
+    #     s_attn = self.conv(self.pool(self.norm1(out)))
+    #     out = s_attn * out
+
+    #     out = x + out
+    #     out = out + self.ffn(self.norm2(out))
+
+    #     return out
+
+    def __init__(self, dim):
+        super().__init__()
+
+        self.norm = LayerNorm(dim, 'BiasFree')
+        self.act = nn.GELU()
+
+        self.DA = CFA(dim)
+
+        self.Conv1 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+        self.Conv2 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+        self.Conv4 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+        self.Conv5 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+        self.Conv6 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+
+        self.conv_dialted = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=3, dilation=3)
+
+        self.down = DownSample(dim)
+
+        self.up = UpSample(dim*2)
+        self.Conv1_1 = nn.Conv2d(dim*2, dim*2, kernel_size=3, stride=1, padding=1)
+        self.Conv1_2 = nn.Conv2d(dim*2, dim*2, kernel_size=3, stride=1, padding=1)
+        self.upsame = UpSample_same(dim*2)
+
+    def forward(self, x):
+        x = self.norm(x)
+
+        x2 = self.DA(x)
+
+        # Resolution-Guided Intrinsic Attention Module (ReGIA)
+        x1 = x2
+        x1 = self.down(x1)
+        x1 = self.act(self.Conv1_1(x1))
+        x1 = self.Conv1_2(x1)
+        x1 = self.up(x1)
+        x1 = torch.sigmoid(x1)
+        x11 = x1 * x2
+
+        # Hierarchical Context-Aware Feature Extraction (HCAFE)
+        x3 = self.conv_dialted(x2)
+        x4 = self.Conv4(x2)
+        x22 = self.Conv2(x3 + x4)
+        x22 = self.Conv5(self.act(x22))
+
+        out = torch.cat([x11, x22], dim=1)
+        out = self.upsame(out) + x2
+
+        out = self.Conv6(self.act(out))
 
         return out
+
+
 
 
 # Composite Shape Convolution
