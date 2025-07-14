@@ -1,1 +1,0 @@
-from .model import UIR_PolyKernel
